@@ -1,1 +1,7 @@
 .env
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime audit log (regenerated on each run; sample entries live in the README)
+audit_log.jsonl

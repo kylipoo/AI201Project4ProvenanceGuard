@@ -91,7 +91,7 @@ Note the uncertain label deliberately shows **no percentage** — surfacing "55%
 
 ### 4. Appeals workflow
 
-- **Who can appeal:** the content's creator — the author who submitted it (identified by `author_id`; in a real platform this is the authenticated content owner). For this project, possession of the `content_id` stands in for ownership, with proper auth noted as out of scope.
+- **Who can appeal:** the content's creator — the author who submitted it (identified by `creator_id`; in a real platform this is the authenticated content owner). For this project, possession of the `content_id` stands in for ownership, with proper auth noted as out of scope.
 - **What they provide:** `content_id` (which decision they're contesting) and `reason` (free-text — their account of why the classification is wrong).
 - **What the system does on receipt:**
   1. Look up the record by `content_id` → `404` if it doesn't exist.
@@ -159,7 +159,7 @@ How each implementation milestone will be built with an AI coding tool: what con
 
 - **Context I'll provide:** the [Detection signals](#1-detection-signals) section (Signal A only), the [Architecture Diagram](#architecture-diagram), and the `POST /submit` contract from [Endpoints needed](#endpoints-needed).
 - **What I'll ask it to generate:**
-  1. A Flask app skeleton with a single `POST /submit` route that accepts `{ content, author_id }`, validates input (non-empty, max length), and returns a structured JSON stub.
+  1. A Flask app skeleton with a single `POST /submit` route that accepts `{ text, creator_id }`, validates input (non-empty, max length), and returns a structured JSON stub.
   2. The **Signal A** function (`stylometric_score(text) -> {score, detail}`) implementing burstiness + lexical diversity + repetition, normalized to 0–1.
 - **How I'll verify:** call `stylometric_score` directly on a handful of hand-picked inputs **before** wiring it into the endpoint — a uniform AI-ish paragraph should score high, a bursty human paragraph low. Then hit `/submit` with curl and confirm the response shape and a 400 on empty input. No second signal or scoring yet — the endpoint can return Signal A's raw score as a placeholder.
 

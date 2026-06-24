@@ -1,0 +1,125 @@
+"""Detection signals for Provenance Guard.
+
+Each signal examines ONE property of the text and returns its own opinion as a
+score in [0, 1], where 1 = "looks AI-generated" and 0 = "looks human-written".
+Signals are deliberately independent so their agreement is meaningful (see the
+false-positive section of planning.md).
+
+This module is pure-stdlib on purpose: Signal A must be testable in isolation,
+without Flask or any API, before it gets wired into the endpoint.
+"""
+
+import re
+from statistics import mean, pstdev
+
+# Below this many words there isn't enough text to say anything; return the
+# maximally-uncertain 0.5 rather than a confident guess. (planning.md: "Treat
+# short text as inherently uncertain.")
+_MIN_WORDS = 15
+
+# Sub-feature weights. Burstiness is the best-documented AI/human discriminator,
+# so it carries the most weight. These are tunable — calibrate against a labeled
+# sample later (noted as stretch in planning.md).
+_W_BURST = 0.5
+_W_LEXICAL = 0.2
+_W_REPETITION = 0.3
+
+
+def _sentences(text):
+    """Split into sentences on terminal punctuation. Crude but adequate."""
+    parts = re.split(r"[.!?]+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _words(text):
+    """Lowercased word tokens."""
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+def _clamp(x):
+    return max(0.0, min(1.0, x))
+
+
+def stylometric_score(text):
+    """Signal A — statistical 'texture' of the writing.
+
+    Combines three sub-features, each mapped so that 1 = looks AI:
+      - burstiness:  low sentence-length variance leans AI (humans vary more)
+      - lexical:     low vocabulary diversity leans AI
+      - repetition:  high repeated-bigram rate leans AI
+
+    Returns a dict matching the spec's signal contract:
+        {"score": float in [0,1], "detail": str, "features": {...}}
+    'features' is an extra (beyond the spec's {score, detail}) so the audit log
+    and the human appeal-reviewer can see *why* — it's additive, not a change.
+    """
+    words = _words(text)
+    sentences = _sentences(text)
+
+    if len(words) < _MIN_WORDS or len(sentences) < 2:
+        return {
+            "score": 0.5,
+            "detail": "insufficient text to analyze confidently",
+            "features": {},
+        }
+
+    # --- Burstiness: coefficient of variation of sentence length (in words) ---
+    sent_lengths = [len(_words(s)) for s in sentences]
+    avg_len = mean(sent_lengths)
+    cv = pstdev(sent_lengths) / avg_len if avg_len else 0.0
+    # Human prose has high variation (cv ~0.6+); AI is smoother (cv ~0.3).
+    # cv >= 0.7 -> 0 (very human); cv = 0 -> 1 (very AI).
+    ai_burst = _clamp(1.0 - cv / 0.7)
+
+    # --- Lexical diversity: type-token ratio (unique / total) ---
+    ttr = len(set(words)) / len(words)
+    # Low diversity leans AI. NOTE: this is the weakest/noisiest sub-feature and
+    # the one that misfires on simple-vocabulary human writing (the Mara case),
+    # which is why it carries the least weight.
+    ai_lexical = _clamp(1.0 - ttr / 0.6)
+
+    # --- Repetition: share of bigrams that are repeats ---
+    bigrams = list(zip(words, words[1:]))
+    repeated_ratio = 1.0 - (len(set(bigrams)) / len(bigrams)) if bigrams else 0.0
+    # repeated_ratio >= 0.4 -> fully AI-leaning on this feature.
+    ai_repetition = _clamp(repeated_ratio / 0.4)
+
+    score = (
+        _W_BURST * ai_burst
+        + _W_LEXICAL * ai_lexical
+        + _W_REPETITION * ai_repetition
+    )
+
+    features = {
+        "burstiness": round(ai_burst, 3),
+        "lexical": round(ai_lexical, 3),
+        "repetition": round(ai_repetition, 3),
+    }
+    # Name the sub-feature that pushed hardest toward the verdict.
+    dominant = max(features, key=features.get)
+    detail = f"{dominant} was the strongest indicator (cv={cv:.2f}, ttr={ttr:.2f})"
+
+    return {"score": round(score, 3), "detail": detail, "features": features}
+
+
+if __name__ == "__main__":
+    # Direct test harness — run `python3 signals.py` to eyeball the scores
+    # BEFORE wiring this into the endpoint (planning.md M3 verification step).
+    samples = {
+        "human (bursty, varied)": (
+            "I waited. The rain came down in sheets, relentless and gray, soaking "
+            "everything I owned and most of what I didn't. Then it stopped. Just "
+            "like that, the sun broke through, and the whole ruined afternoon "
+            "turned, impossibly, into something almost worth remembering."
+        ),
+        "ai-ish (smooth, uniform)": (
+            "The system provides a comprehensive solution for users. It offers a "
+            "range of features that enhance productivity and efficiency. Users can "
+            "easily access the tools they need. The platform supports a variety of "
+            "workflows and use cases. It is designed to be intuitive and reliable."
+        ),
+        "short (insufficient)": "It rained today.",
+    }
+    for label, txt in samples.items():
+        result = stylometric_score(txt)
+        print(f"{label:28s} -> {result['score']:.3f}  ({result['detail']})")
