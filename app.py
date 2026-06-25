@@ -1,9 +1,8 @@
 """Provenance Guard — content attribution API.
 
-M3 scope: POST /submit accepts text and runs Signal A (stylometric) only.
-Signal B, confidence scoring, transparency labels, rate limiting, the audit log,
-and appeals are later milestones — the /submit response below is a STUB that
-returns the raw Signal A result as a placeholder for the full pipeline.
+POST /submit runs two signals (stylometric + Groq LLM judge), fuses them into a
+confidence score, maps that to a transparency label, and writes an audit entry.
+GET /log returns recent audit entries. Still to come: rate limiting and appeals.
 """
 
 import uuid
@@ -11,7 +10,8 @@ import uuid
 from flask import Flask, jsonify, request
 
 import audit
-from signals import stylometric_score
+from scoring import fuse, to_label
+from signals import llm_judge_score, stylometric_score
 
 app = Flask(__name__)
 
@@ -54,23 +54,19 @@ def submit():
         return jsonify({"error": "creator_id is required and must be a non-empty string"}), 400
 
     content_id = "c_" + uuid.uuid4().hex[:10]
-    signal_a = stylometric_score(text)
 
-    # Attribution result from signal 1, using the planning.md threshold bands
-    # (>=0.85 ai, <0.25 human, else uncertain). Provisional: based on ONE signal
-    # until Signal B and the fusion scorer arrive.
-    score = signal_a["score"]
-    if score >= 0.85:
-        attribution = "ai"
-    elif score < 0.25:
-        attribution = "human"
-    else:
-        attribution = "uncertain"
+    # --- Multi-signal detection -----------------------------------------
+    signal_a = stylometric_score(text)          # stylometric (statistics)
+    signal_b = llm_judge_score(text)            # semantic LLM judge (Groq)
 
-    # PLACEHOLDERS until the fusion scorer + label mapper exist. `confidence`
-    # echoes Signal A's lone score as a stand-in; `label` is a fixed stub.
-    confidence = score
-    label = "Placeholder — final confidence scoring and transparency label not yet implemented"
+    # --- Fusion + label mapping (see scoring.py / planning.md) -----------
+    word_count = len(text.split())
+    confidence = fuse(
+        signal_a["score"], signal_b["score"], word_count, signal_b["available"]
+    )
+    verdict = to_label(confidence)
+    attribution = verdict["classification"]
+    label = verdict["label"]
 
     # Write a structured audit entry for this decision. The appeal workflow
     # (M5) will look this record up by content_id and mutate its status.
@@ -80,7 +76,9 @@ def submit():
             "creator_id": creator_id,
             "attribution": attribution,
             "confidence": confidence,
-            "stylometric_score": score,
+            "stylometric_score": signal_a["score"],
+            "llm_score": signal_b["score"],
+            "llm_available": signal_b["available"],
             "status": "classified",
         }
     )
@@ -93,9 +91,8 @@ def submit():
             "confidence": confidence,
             "label": label,
             "received_chars": len(text),
-            "signals": {"stylometric": signal_a},
+            "signals": {"stylometric": signal_a, "llm_judge": signal_b},
             "status": "classified",
-            "note": "Stub: attribution/confidence from Signal A only; Signal B + fusion + real label pending",
         }
     ), 200
 
