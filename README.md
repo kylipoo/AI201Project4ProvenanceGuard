@@ -16,24 +16,24 @@ Signal A scored this **0.247 → human**, because the text has varied sentence l
 rich vocabulary, and no repetition — the surface statistics all look human.
 
 **Conclusion:** surface statistics (burstiness, lexical diversity, repetition) detect
-*clumsy* AI (e.g. "The product is very good. The product is very nice…" → 0.889) but are
+_clumsy_ AI (e.g. "The product is very good. The product is very nice…" → 0.889) but are
 **blind to fluent AI**. A human recognizes the paragraph above as AI from its hollow,
-hedging register — which is *semantic*, not statistical. No amount of additional
+hedging register — which is _semantic_, not statistical. No amount of additional
 stylometric features would fix this; they would all fail on the same input.
 
 This is the concrete motivation for **Signal B (a semantic LLM judge)**: it fails on
-*different* inputs than Signal A, which is exactly what makes combining the two
+_different_ inputs than Signal A, which is exactly what makes combining the two
 (fusion) more reliable than either alone. A single signal of any kind is unreliable —
 that is the core reason this system uses two.
 
 ## Design change made during development: weighting the Groq layer more heavily
 
 The original plan fused the two signals as near-equal peers (Signal A 0.4, Signal B 0.6)
-with a *disagreement penalty* that pushed the score toward "uncertain" whenever the two
+with a _disagreement penalty_ that pushed the score toward "uncertain" whenever the two
 conflicted. Testing the batch above broke that design: because stylometric cues like
 **sentence structure are not a guaranteed indicator that something was written by AI**,
 Signal A confidently mislabels fluent AI as human — and the equal-peer fusion then let
-that wrong Signal A *cancel out* a correct Signal B, collapsing the verdict to "uncertain."
+that wrong Signal A _cancel out_ a correct Signal B, collapsing the verdict to "uncertain."
 
 So during development I rebalanced the fusion to **weight the Groq (Signal B) layer much
 more heavily**:
@@ -48,15 +48,81 @@ more heavily**:
 
 **Result — same paragraph, before vs. after:**
 
-| | Signal A | Signal B | Fused confidence | Verdict |
-|---|---|---|---|---|
-| Before (Signal A alone) | 0.247 | — | 0.247 | human ❌ |
-| After (Groq-weighted fusion) | 0.25 | 0.90 | **0.769** | **ai** ✅ |
+|                              | Signal A | Signal B | Fused confidence | Verdict   |
+| ---------------------------- | -------- | -------- | ---------------- | --------- |
+| Before (Signal A alone)      | 0.247    | —        | 0.247            | human ❌  |
+| After (Groq-weighted fusion) | 0.25     | 0.90     | **0.769**        | **ai** ✅ |
 
 And a genuine human poem (clean, spare style that fools the statistics) still lands at
-~0.41 → **uncertain**, *not* falsely accused — confirming that weighting Groq more heavily
+~0.41 → **uncertain**, _not_ falsely accused — confirming that weighting Groq more heavily
 catches fluent AI without sacrificing protection for real writers.
+
+## Rate limiting
+
+The submission endpoint is the expensive path: every `POST /submit` fans out to
+two signals, one of which is a **Groq LLM call** (network latency + per-token
+cost). Left unprotected, a script could flood it — running up the bill and
+starving real users. So Flask-Limiter (keyed by client IP via
+`get_remote_address`) guards the write endpoints:
+
+| Endpoint       | Limit                  | Reasoning                                                                                                                                                                                                                                                                                             |
+| -------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /submit` | **10/minute; 100/day** | A real writer checks a handful of drafts in a burst — 10/min covers active editing comfortably while blocking a script firing hundreds. 100/day bounds total Groq spend per IP and stops a slow drip that stays under the minute cap. A genuine individual won't submit 100 distinct pieces in a day. |
+| `POST /appeal` | **20/hour**            | Appeals are rare by nature (you contest a verdict, you don't spam them) and each one rewrites the audit log. 20/hour is generous for legitimate use yet caps abuse of the mutation path.                                                                                                              |
+
+Read endpoints (`GET /log`, `GET /content/{id}`) are left unlimited — they're
+cheap and read-only. Over-limit requests get a **429** as JSON (matching the
+rest of the API's error shape), e.g. `{"error": "rate limit exceeded", ...}`.
+
+### Evidence
+
+Sending 12 rapid `POST /submit` requests (the app runs on port **5001**). The
+request body lives in `rl_payload.json` and is passed with `curl -d @file` — this
+keeps the JSON out of the shell entirely, so apostrophes/quotes in the text need
+no escaping:
+
+```
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5001/submit \
+    -H "Content-Type: application/json" \
+    -d @rl_payload.json
+done
+```
+
+Output — the first 10 succeed, then the limiter kicks in:
+
+```
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+429
+429
+```
+
+The 429 response body (JSON, matching the API's error shape):
+
+```json
+{
+    "detail": "10 per 1 minute",
+    "error": "rate limit exceeded"
+}
+```
+
+**Scope notes (deliberately out of scope here):** limits are keyed by IP because
+there's no auth yet — once creators authenticate, keying by `creator_id` would be
+fairer (one abuser behind a shared NAT can't exhaust everyone's quota). Storage
+is in-memory, so limits reset on restart and aren't shared across workers; a real
+deployment would point `storage_uri` at Redis.
 
 ---
 
-Content ID to save: c_8c88786d82
+Content ID to save: c_6bed7298ab, It should be considered a human written one, but said uncertain.
+curl -s -X POST http://localhost:5001/s
+ubmit -H "Content-Type: application/json" -d '{"text": "The sun dipped below the horizon, painting the sky in hues of amber and rose. I sat on the porch, coffee in hand, watching the neighborhood slowly go quiet.", "creator_id": "test-user-1"}' | python3 -m json.tool

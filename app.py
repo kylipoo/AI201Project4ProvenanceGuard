@@ -2,12 +2,18 @@
 
 POST /submit runs two signals (stylometric + Groq LLM judge), fuses them into a
 confidence score, maps that to a transparency label, and writes an audit entry.
-GET /log returns recent audit entries. Still to come: rate limiting and appeals.
+POST /appeal lets a creator contest a verdict (attaches their reason, flips the
+record to under_review, runs no re-classification). GET /content/{id} returns a
+single record; GET /log returns recent audit entries (optionally filtered by
+status). A per-IP rate limiter (Flask-Limiter) protects the write endpoints —
+especially the Groq-backed detection pipeline — from flooding.
 """
 
 import uuid
 
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 import audit
 from scoring import fuse, to_label
@@ -18,6 +24,26 @@ app = Flask(__name__)
 # Reject anything longer than this outright (validation, not detection).
 MAX_CONTENT_CHARS = 10_000
 
+# --- Rate limiting ------------------------------------------------------------
+# Key by client IP (no auth yet, so IP is the best abuse signal we have). Limits
+# are declared per-route below rather than globally, so read endpoints stay free
+# while the expensive write paths are protected. in-memory storage is fine for a
+# single-process dev server; a real deployment would point storage_uri at Redis
+# so limits are shared across workers and survive restarts. See README "Rate
+# limiting" for why each number was chosen.
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+
+
+@app.errorhandler(429)
+def ratelimit_exceeded(e):
+    """Return the 429 as JSON so it matches the rest of the API's error shape."""
+    return jsonify({"error": "rate limit exceeded", "detail": str(e.description)}), 429
+
 
 @app.route("/")
 def home():
@@ -25,6 +51,7 @@ def home():
 
 
 @app.route("/submit", methods=["POST"])
+@limiter.limit("10 per minute;100 per day")
 def submit():
     """Accept a piece of text for attribution analysis.
 
@@ -97,15 +124,72 @@ def submit():
     ), 200
 
 
+@app.route("/appeal", methods=["POST"])
+@limiter.limit("20 per hour")
+def appeal():
+    """Contest a classification. Request body (JSON):
+
+        { "content_id": "<the decision being contested>",
+          "creator_reasoning": "<free-text: why the classification is wrong>" }
+
+    Looks up the original decision and attaches the creator's reasoning, then
+    flips status to "under_review" for a human to take over. The original
+    attribution/confidence/signals are PRESERVED, never overwritten, and NO
+    re-classification runs. Returns a confirmation plus the updated record.
+    404 if content_id is unknown; 400 on invalid input.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "request body must be JSON"}), 400
+
+    content_id = data.get("content_id")
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify({"error": "content_id is required and must be a non-empty string"}), 400
+
+    # `creator_reasoning` is the canonical field; `reason` is accepted as an alias.
+    creator_reasoning = data.get("creator_reasoning") or data.get("reason")
+    if not isinstance(creator_reasoning, str) or not creator_reasoning.strip():
+        return jsonify(
+            {"error": "creator_reasoning is required and must be a non-empty string"}
+        ), 400
+
+    record = audit.attach_appeal(content_id, creator_reasoning)
+    if record is None:
+        return jsonify({"error": f"no content found with id {content_id}"}), 404
+
+    # Explicit confirmation that the appeal was received, plus the updated record
+    # so the caller can see the new status and the preserved original decision.
+    return jsonify(
+        {
+            "message": "Appeal received. This content is now under review by a human.",
+            "content_id": content_id,
+            "status": record["status"],
+            "record": record,
+        }
+    ), 200
+
+
+@app.route("/content/<content_id>", methods=["GET"])
+def get_content(content_id):
+    """Return one piece of content's audit record so its creator can see the
+    verdict (and decide whether to appeal). 404 if the id is unknown."""
+    record = audit.find_entry(content_id)
+    if record is None:
+        return jsonify({"error": f"no content found with id {content_id}"}), 404
+    return jsonify(record), 200
+
+
 @app.route("/log", methods=["GET"])
 def log():
     """Return recent audit-log entries as JSON, most recent first.
 
-    Optional ?limit=N caps the number returned. In a real system this would
+    Optional ?limit=N caps the number returned and ?status=under_review filters
+    to the appeal queue a human reviewer works. In a real system this would
     require auth; here it exists for documentation and grading visibility.
     """
     limit = request.args.get("limit", type=int)
-    return jsonify({"entries": audit.get_log(limit=limit)})
+    status = request.args.get("status")
+    return jsonify({"entries": audit.get_log(limit=limit, status=status)})
 
 
 if __name__ == "__main__":

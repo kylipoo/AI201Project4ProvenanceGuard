@@ -92,10 +92,10 @@ Note the uncertain label deliberately shows **no percentage** — surfacing "55%
 ### 4. Appeals workflow
 
 - **Who can appeal:** the content's creator — the author who submitted it (identified by `creator_id`; in a real platform this is the authenticated content owner). For this project, possession of the `content_id` stands in for ownership, with proper auth noted as out of scope.
-- **What they provide:** `content_id` (which decision they're contesting) and `reason` (free-text — their account of why the classification is wrong).
+- **What they provide:** `content_id` (which decision they're contesting) and `creator_reasoning` (free-text — their account of why the classification is wrong). `reason` is accepted as a backward-compatible alias.
 - **What the system does on receipt:**
   1. Look up the record by `content_id` → `404` if it doesn't exist.
-  2. Append an `appeal` object `{ reason, submitted_at }` to that record — the original `classification`, `confidence`, and `signals` are **preserved, never overwritten**.
+  2. Append an `appeal` object `{ creator_reasoning, submitted_at }` to that record — the original `classification`, `confidence`, and `signals` are **preserved, never overwritten**.
   3. Flip `status: "classified" → "under_review"`.
   4. The audit log now reflects both the original decision and the appeal on the same record (the log _is_ the record store).
   5. Return the updated record. **No automated re-classification** — a human takes it from here.

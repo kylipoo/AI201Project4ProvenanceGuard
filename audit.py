@@ -42,10 +42,56 @@ def append_entry(entry):
     return entry
 
 
-def get_log(limit=None):
-    """Return entries most-recent-first, optionally capped to `limit`."""
+def get_log(limit=None, status=None):
+    """Return entries most-recent-first, optionally filtered/capped.
+
+    `status` filters to one lifecycle state — the appeal queue is just
+    get_log(status="under_review"). `limit` caps the count after filtering.
+    """
     ordered = list(reversed(_entries))
+    if status:
+        ordered = [e for e in ordered if e.get("status") == status]
     return ordered[:limit] if limit else ordered
+
+
+def find_entry(content_id):
+    """Return the live record for `content_id`, or None if absent."""
+    for entry in _entries:
+        if entry.get("content_id") == content_id:
+            return entry
+    return None
+
+
+def _persist_all():
+    """Rewrite the whole log file from the in-memory entries.
+
+    append_entry() is the fast path for brand-new records. The appeal workflow
+    instead *mutates* an existing record in place (status flip + appeal
+    attached), which an append-only file can't express — so we rewrite it.
+    """
+    with open(_LOG_PATH, "w", encoding="utf-8") as f:
+        for entry in _entries:
+            f.write(json.dumps(entry) + "\n")
+
+
+def attach_appeal(content_id, creator_reasoning):
+    """Attach a creator's appeal to an existing record and flip it to review.
+
+    Returns the mutated record, or None if no record has that content_id. The
+    original attribution/confidence/signals are PRESERVED — only `status`
+    changes and an `appeal` object is added. No re-classification happens here;
+    a human reviewer takes the record from `under_review`. Persists the log.
+    """
+    record = find_entry(content_id)
+    if record is None:
+        return None
+    record["appeal"] = {
+        "creator_reasoning": creator_reasoning,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    record["status"] = "under_review"
+    _persist_all()
+    return record
 
 
 _load()
