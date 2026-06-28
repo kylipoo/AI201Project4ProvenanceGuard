@@ -1,0 +1,5 @@
+Submit: 
+
+curl -s -X POST http://localhost:5001/submit \
+  -H "Content-Type: application/json" \
+  -d @humanexample.json | python3 -m json.tool

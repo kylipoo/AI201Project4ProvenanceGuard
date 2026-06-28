@@ -1,0 +1,12 @@
+Submit: 
+
+curl -s -X POST http://localhost:5001/submit \
+  -H "Content-Type: application/json" \
+  -d @uncertainexample.json | python3 -m json.tool
+
+
+  Contest: 
+
+curl -s -X POST http://localhost:5001/appeal \
+  -H "Content-Type: application/json" \
+  -d '{"content_id": "c_327c119986", "creator_reasoning": "I wrote this myself from personal experience. I am a non-native English speaker and my writing style may appear more formal than typical."}' | python -m json.tool
